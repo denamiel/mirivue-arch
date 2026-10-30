@@ -22,6 +22,7 @@ pacman --config "$validation_dir/pacman.conf" --gpgdir "$validation_dir/keyring"
   --noconfirm -Syu mirivue-gnome mirivue-kde
 mirivue-gnome --version
 mirivue-kde --version
+python scripts/check_installed_docs.py "$repository_dir"
 QT_QPA_PLATFORM=offscreen timeout 45 mirivue-kde --smoke-test
 xvfb-run -a dbus-run-session -- timeout 45 mirivue-gnome --window-smoke-test
 # Signature failures must never be accepted as a valid repository.
