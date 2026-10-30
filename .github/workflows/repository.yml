@@ -112,11 +112,19 @@ jobs:
           merge-multiple: true
       - name: Créer une clé éphémère réservée aux tests
         run: |
+          test_key_origin="$(mktemp -d)"
+          chmod 700 "$test_key_origin"
+          export GNUPGHOME="$test_key_origin"
+          test_password='Disposable CI key only'
+          gpg --batch --pinentry-mode loopback --passphrase "$test_password" --quick-generate-key 'Mirivue repository CI only' ed25519 sign 1d
+          fingerprint="$(gpg --batch --with-colons --fingerprint --list-secret-keys | awk -F: '$1 == "fpr" {print $10; exit}')"
+          test_private="$(gpg --batch --pinentry-mode loopback --passphrase "$test_password" --armor --export-secret-keys "$fingerprint")"
           test_key_home="$(mktemp -d)"
           chmod 700 "$test_key_home"
-          export GNUPGHOME="$test_key_home"
-          gpg --batch --pinentry-mode loopback --passphrase '' --quick-generate-key 'Mirivue repository CI only' ed25519 sign 1d
-          fingerprint="$(gpg --batch --with-colons --fingerprint --list-secret-keys | awk -F: '$1 == "fpr" {print $10; exit}')"
+          GNUPGHOME="$test_key_home" SIGNING_PRIVATE_KEY="$test_private" SIGNING_PASSPHRASE="$test_password" SIGNING_FINGERPRINT="$fingerprint" python scripts/import_signing_key.py
+          gpgconf --kill all
+          rm -rf -- "$test_key_origin"
+          unset test_private test_password
           echo "GNUPGHOME=$test_key_home" >> "$GITHUB_ENV"
           echo "SIGNING_FINGERPRINT=$fingerprint" >> "$GITHUB_ENV"
       - name: Signer et vérifier le catalogue de test

@@ -81,6 +81,31 @@ class RepositoryTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 repo.package_info(second)
 
+    def test_corresponding_source_archives_are_reproducible_for_rebuilds(self):
+        import hashlib
+        import os
+        import tarfile
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / 'upstream'
+            (source / 'mirivue').mkdir(parents=True)
+            (source / 'packaging').mkdir()
+            (source / 'mirivue/__init__.py').write_text('__version__ = "1.0.0-beta.2"')
+            (source / 'packaging/PKGBUILD.template').write_text('pkgname=mirivue-kde\npkgver=@PKGVER@\npkgrel=1\n')
+            entry = dict(edition='kde', repository=repo.SOURCES['kde'][0], upstream='1.0.0-beta.2',
+                         pkgver='1.0.0beta2', pkgrel=3, name='mirivue-kde', sha='a' * 40)
+            first, second = root / 'first', root / 'second'
+            repo.prepare_build(entry, source, first)
+            os.utime(source / 'mirivue/__init__.py', (500, 500))
+            repo.prepare_build(entry, source, second)
+            first_archive = next((first / 'source-artifact').iterdir())
+            second_archive = next((second / 'source-artifact').iterdir())
+            self.assertEqual(hashlib.sha256(first_archive.read_bytes()).digest(),
+                             hashlib.sha256(second_archive.read_bytes()).digest())
+            with tarfile.open(first_archive) as archive:
+                self.assertIn('mirivue-source/mirivue/__init__.py', archive.getnames())
+            self.assertIn('pkgrel=3', (second / 'PKGBUILD').read_text())
+
     def test_downgrade_and_unannounced_signing_key_change_prevent_uploads(self):
         current = {'schema': 1, 'signing_fingerprint': 'A' * 40,
                    'packages': {name: {'pkgver': '1.0.0beta2', 'pkgrel': 1, 'filename': name + '.pkg.tar.zst'}
