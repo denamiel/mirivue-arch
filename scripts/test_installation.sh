@@ -11,6 +11,8 @@ pacman-key --gpgdir "$validation_dir/keyring" --populate archlinux
 pacman-key --gpgdir "$validation_dir/keyring" --add "$repository_dir/mirivue-key.asc"
 pacman-key --gpgdir "$validation_dir/keyring" --lsign-key "$(cat "$repository_dir/fingerprint.txt")"
 cp /etc/pacman.conf "$validation_dir/pacman.conf"
+# Keep documentation in this disposable test even if the base image excludes it.
+sed -i '/^[[:space:]]*NoExtract[[:space:]]*=/ s|$| !usr/share/doc/*|' "$validation_dir/pacman.conf"
 cat >> "$validation_dir/pacman.conf" <<EOF
 
 [mirivue]
