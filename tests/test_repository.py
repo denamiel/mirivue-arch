@@ -105,6 +105,7 @@ class RepositoryTests(unittest.TestCase):
             with tarfile.open(first_archive) as archive:
                 self.assertIn('mirivue-source/mirivue/__init__.py', archive.getnames())
             self.assertIn('pkgrel=3', (second / 'PKGBUILD').read_text())
+            self.assertIn("options+=('!debug')", (second / 'PKGBUILD').read_text())
 
     def test_downgrade_and_unannounced_signing_key_change_prevent_uploads(self):
         current = {'schema': 1, 'signing_fingerprint': 'A' * 40,

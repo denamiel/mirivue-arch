@@ -119,7 +119,9 @@ def prepare_build(entry, source, destination):
         raise ValueError('Unexpected package name in recipe')
     # A repository rebuild must have a new pkgrel even when the source version
     # stays the same. The upstream applications and settings are not changed.
-    (destination / 'PKGBUILD').write_text(recipe + '\npkgrel=' + str(entry['pkgrel']) + '\n')
+    # Arch enables debug packages by default; this repository distributes only
+    # the two applications, without an additional KDE debug package.
+    (destination / 'PKGBUILD').write_text(recipe + '\npkgrel=' + str(entry['pkgrel']) + "\noptions+=('!debug')\n")
     source_artifact = destination / 'source-artifact'
     source_artifact.mkdir(exist_ok=True)
     shutil.copyfile(archive, source_artifact / (entry['name'] + '-' + entry['sha'] + '-sources.tar.gz'))
