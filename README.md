@@ -1,8 +1,14 @@
 # Mirivue — dépôt Pacman pour Arch Linux et CachyOS
 
-**État : préparation et validation. La publication est désactivée tant que le
-propriétaire n'a pas configuré sa clé et la variable `PUBLISH_ENABLED=true`.**
-Ne pas ajouter ce dépôt à Pacman avant la première publication réussie.
+**Le dépôt signé est publié.** La première publication, les signatures et
+l'installation simultanée des deux éditions ont réussi :
+[exécution de référence](https://github.com/denamiel/mirivue-arch/actions/runs/41141962504).
+Les paquets actuels sont dans la
+[publication `repository`](https://github.com/denamiel/mirivue-arch/releases/tag/repository).
+
+Le dépôt fournit des préversions. Les réglages de publication restent sous le
+contrôle du propriétaire ; une suspension ou un échec bloque les nouvelles
+publications sans retirer les paquets déjà disponibles.
 
 Ce dépôt héberge le mécanisme de distribution de deux paquets indépendants :
 
@@ -55,19 +61,41 @@ séparée : une nouvelle clé n'est jamais silencieusement imposée aux utilisat
 
 ## Mise en service par le propriétaire
 
-Voir [CONFIGURATION.md](CONFIGURATION.md). La clé privée et sa phrase secrète
+La configuration initiale a déjà été effectuée. [CONFIGURATION.md](CONFIGURATION.md)
+décrit son fonctionnement et sa maintenance ; les utilisateurs n'ont pas à
+recréer de clé ni à configurer GitHub. La clé privée et sa phrase secrète
 ne doivent jamais être envoyées dans la conversation ou enregistrées dans Git.
 Les scripts de configuration sont à lancer sur l'ordinateur du propriétaire.
 
-## Installation sur Arch / CachyOS x86_64 — après activation
+## Installation sur Arch / CachyOS x86_64
 
-1. Télécharger `mirivue-key.asc` et afficher son empreinte avec
-   `gpg --show-keys --fingerprint mirivue-key.asc`.
-2. Vérifier cette empreinte complète auprès du propriétaire avant de lui accorder
-   confiance. Ne pas considérer une empreinte téléchargée avec la clé comme une
-   preuve indépendante de son identité.
-3. Importer puis approuver cette clé avec `sudo pacman-key --add mirivue-key.asc`
-   et `sudo pacman-key --lsign-key EMPREINTE_COMPLETE_VERIFIEE`.
+Cette configuration se fait une seule fois sur l'ordinateur Arch/CachyOS.
+Aucun compte GitHub ou AUR et aucune clé privée ne sont nécessaires.
+
+1. Télécharger la [clé publique](https://github.com/denamiel/mirivue-arch/releases/download/repository/mirivue-key.asc)
+   et afficher son empreinte :
+
+   ```bash
+   curl -fL https://github.com/denamiel/mirivue-arch/releases/download/repository/mirivue-key.asc -o /tmp/mirivue-key.asc
+   gpg --show-keys --fingerprint /tmp/mirivue-key.asc
+   ```
+
+2. Comparer l'empreinte complète à celle confirmée par le propriétaire :
+
+   ```text
+   F22D CDD1 DF8D 9947 3E00 B8A3 7795 95DA 37BF E3E0
+   ```
+
+   Ne pas considérer une empreinte téléchargée avec la clé comme une preuve
+   indépendante d'identité. En cas de différence, ne pas accorder la confiance.
+
+3. Si elle correspond, importer puis approuver la clé :
+
+   ```bash
+   sudo pacman-key --add /tmp/mirivue-key.asc
+   sudo pacman-key --lsign-key F22DCDD1DF8D99473E00B8A3779595DA37BFE3E0
+   ```
+
 4. Ajouter à la fin de `/etc/pacman.conf`, sans retirer les dépôts existants :
 
 ```ini
@@ -82,6 +110,10 @@ Puis installer l'édition voulue avec une mise à jour complète :
 sudo pacman -Syu mirivue-gnome
 # Ou : sudo pacman -Syu mirivue-kde
 ```
+
+Pour installer les deux éditions : `sudo pacman -Syu mirivue-gnome mirivue-kde`.
+Ne pas ajouter deux fois la section `[mirivue]` et ne pas utiliser `--overwrite`
+pour masquer un conflit avec une ancienne installation ; vérifier sa provenance.
 
 Les éditions peuvent coexister. Les mises à jour suivantes utilisent
 `sudo pacman -Syu`. Ce dépôt fournit actuellement des versions bêta.

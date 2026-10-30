@@ -1,7 +1,14 @@
-# Activer la signature et la publication
+# Configuration de la signature et maintenance
 
-Les fichiers sont préparés ; aucun paquet de production n'est publié avant
-configuration. Ces opérations appartiennent au propriétaire du dépôt.
+La configuration initiale et la première publication signée ont réussi :
+https://github.com/denamiel/mirivue-arch/actions/runs/41141962504
+
+Ce guide concerne le propriétaire et une éventuelle nouvelle installation du
+circuit de publication. Les utilisateurs Arch/CachyOS suivent uniquement
+[README.md](README.md) ; ils n'ont pas à créer de clé ou de secret GitHub.
+Ne pas recréer ni remplacer la clé existante pour une mise à jour ordinaire.
+Les étapes ci-dessous décrivent la configuration initiale, pas une opération
+à répéter à chaque version.
 
 ## 1. Préparer son ordinateur
 
