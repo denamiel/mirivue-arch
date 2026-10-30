@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+plan.json
+work/
+upstream/
+unsigned/
+candidate/
+*.asc
+*.pkg.tar.zst
+*.sig

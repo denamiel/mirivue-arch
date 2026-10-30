@@ -1,0 +1,198 @@
+name: Dépôt Pacman — validation et publication signée
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: Reconstruire même sans nouvelle version (incrémente pkgrel)
+        type: boolean
+        default: false
+  schedule:
+    - cron: '17 * * * *'
+permissions:
+  contents: read
+concurrency:
+  group: mirivue-pacman-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'main' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.plan.outputs.build }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Tests de la sélection des sources et des garde-fous
+        run: python3 -m unittest discover -s tests -v
+      - name: Sélectionner seulement les commits main déjà validés
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PUBLISH_ENABLED: ${{ vars.PUBLISH_ENABLED }}
+          FORCE_REBUILD: ${{ inputs.force_rebuild }}
+        run: python3 scripts/repository.py plan
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-plan
+          path: plan.json
+          if-no-files-found: error
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      GSK_RENDERER: cairo
+    steps:
+      - name: Préparer Arch et un compte de construction sans privilèges
+        run: |
+          pacman -Syu --noconfirm --needed git sudo python xorg-server-xvfb xorg-xauth dbus ttf-dejavu
+          useradd -m builder
+          echo 'builder ALL=(ALL) NOPASSWD: /usr/bin/pacman' > /etc/sudoers.d/builder
+          chmod 440 /etc/sudoers.d/builder
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.repository }}
+          ref: ${{ matrix.sha }}
+          path: upstream
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-plan
+          path: .
+      - name: Préparer la recette officielle et la révision du dépôt
+        env:
+          EDITION: ${{ matrix.edition }}
+        run: |
+          python scripts/repository.py prepare --edition "$EDITION" --source upstream --directory work
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+      - name: Construire et exécuter les contrôles de la recette
+        run: |
+          runuser -u builder -- bash -c 'cd "$1/work"; makepkg --noconfirm --syncdeps --cleanbuild' -- "$GITHUB_WORKSPACE"
+          mkdir unsigned
+          cp work/*.pkg.tar.zst work/source-artifact/*.tar.gz unsigned/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-${{ matrix.name }}
+          path: unsigned/*
+          if-no-files-found: error
+
+  installation:
+    name: Vérifier les signatures et installer les deux éditions avec Pacman
+    needs: [plan, build]
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - name: Préparer les outils natifs de validation
+        run: pacman -Syu --noconfirm --needed python gnupg git xorg-server-xvfb xorg-xauth dbus ttf-dejavu
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-plan
+          path: .
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: unsigned-*
+          path: unsigned
+          merge-multiple: true
+      - name: Créer une clé éphémère réservée aux tests
+        run: |
+          test_key_origin="$(mktemp -d)"
+          chmod 700 "$test_key_origin"
+          export GNUPGHOME="$test_key_origin"
+          test_password='Disposable CI key only'
+          gpg --batch --pinentry-mode loopback --passphrase "$test_password" --quick-generate-key 'Mirivue repository CI only' ed25519 sign 1d
+          fingerprint="$(gpg --batch --with-colons --fingerprint --list-secret-keys | awk -F: '$1 == "fpr" {print $10; exit}')"
+          test_private="$(gpg --batch --pinentry-mode loopback --passphrase "$test_password" --armor --export-secret-keys "$fingerprint")"
+          test_key_home="$(mktemp -d)"
+          chmod 700 "$test_key_home"
+          GNUPGHOME="$test_key_home" SIGNING_PRIVATE_KEY="$test_private" SIGNING_PASSPHRASE="$test_password" SIGNING_FINGERPRINT="$fingerprint" python scripts/import_signing_key.py
+          gpgconf --kill all
+          rm -rf -- "$test_key_origin"
+          unset test_private test_password
+          echo "GNUPGHOME=$test_key_home" >> "$GITHUB_ENV"
+          echo "SIGNING_FINGERPRINT=$fingerprint" >> "$GITHUB_ENV"
+      - name: Signer et vérifier le catalogue de test
+        run: |
+          python scripts/repository.py index
+          bash scripts/validate_repository.sh candidate
+      - name: Installer les paquets signés et refuser les données altérées
+        env:
+          GTK_A11Y: none
+          GSK_RENDERER: cairo
+          QT_QPA_PLATFORM: offscreen
+        run: bash scripts/test_installation.sh candidate
+      - name: Détruire la clé éphémère (jamais publiée)
+        if: always()
+        run: |
+          if [[ -n "${GNUPGHOME:-}" ]]; then
+            gpgconf --kill all || true
+            rm -rf -- "$GNUPGHOME"
+          fi
+
+  publish:
+    name: Publier le dépôt avec la clé du propriétaire
+    needs: [plan, build, installation]
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && vars.PUBLISH_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    permissions:
+      contents: write
+    steps:
+      - name: Préparer les outils de signature et publication
+        run: pacman -Syu --noconfirm --needed python gnupg github-cli git
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-plan
+          path: .
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: unsigned-*
+          path: unsigned
+          merge-multiple: true
+      - name: Préparer le trousseau temporaire de signature
+        run: |
+          signing_home="$(mktemp -d)"
+          chmod 700 "$signing_home"
+          echo "GNUPGHOME=$signing_home" >> "$GITHUB_ENV"
+      - name: Importer la clé dédiée depuis les secrets GitHub
+        env:
+          SIGNING_PRIVATE_KEY: ${{ secrets.SIGNING_PRIVATE_KEY }}
+          SIGNING_PASSPHRASE: ${{ secrets.SIGNING_PASSPHRASE }}
+          SIGNING_FINGERPRINT: ${{ vars.SIGNING_FINGERPRINT }}
+        run: python scripts/import_signing_key.py
+      - name: Signer et contrôler les paquets et le catalogue définitifs
+        env:
+          SIGNING_FINGERPRINT: ${{ vars.SIGNING_FINGERPRINT }}
+        run: |
+          python scripts/repository.py index
+          bash scripts/validate_repository.sh candidate
+      - name: Publier après réussite de tous les contrôles
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/repository.py publish --directory candidate
+      - name: Supprimer le trousseau privé temporaire
+        if: always()
+        run: |
+          if [[ -n "${GNUPGHOME:-}" ]]; then
+            gpgconf --kill all || true
+            rm -rf -- "$GNUPGHOME"
+          fi
