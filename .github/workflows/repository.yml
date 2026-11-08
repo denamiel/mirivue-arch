@@ -9,6 +9,10 @@ on:
         description: Reconstruire même sans nouvelle version (incrémente pkgrel)
         type: boolean
         default: false
+      publier:
+        description: Pour publier le dépôt signé, taper exactement PUBLIER
+        required: false
+        default: ''
   schedule:
     - cron: '17 * * * *'
 permissions:
@@ -148,8 +152,15 @@ jobs:
   publish:
     name: Publier le dépôt avec la clé du propriétaire
     needs: [plan, build, installation]
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && vars.PUBLISH_ENABLED == 'true'
+    # Les exécutions planifiées et les push valident et construisent seulement.
+    # Publication : lancement manuel, confirmation tapée, environnement approuvé.
+    if: >-
+      github.ref == 'refs/heads/main'
+      && github.event_name == 'workflow_dispatch'
+      && inputs.publier == 'PUBLIER'
+      && vars.PUBLISH_ENABLED == 'true'
     runs-on: ubuntu-latest
+    environment: publication-pacman
     container: archlinux:base-devel
     permissions:
       contents: write

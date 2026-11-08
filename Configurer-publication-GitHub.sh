@@ -20,6 +20,7 @@ printf '%s' "$signing_password" | gh secret set SIGNING_PASSPHRASE --repo "$repo
 unset signing_password
 gh variable set SIGNING_FINGERPRINT --repo "$repository" --body "$fingerprint"
 gh variable set PUBLISH_ENABLED --repo "$repository" --body true
-gh workflow run repository.yml --repo "$repository"
+gh workflow run repository.yml --repo "$repository" --ref main -f publier=PUBLIER
 echo 'Configuration envoyée directement à GitHub ; première publication demandée.'
+echo 'Approuvez ensuite l’environnement publication-pacman sur la page de l’exécution.'
 echo "Suivi : https://github.com/$repository/actions"

@@ -51,10 +51,16 @@ Le script envoie directement à GitHub, au dépôt `denamiel/mirivue-arch` :
 - le secret `SIGNING_PRIVATE_KEY` depuis le fichier local ;
 - le secret `SIGNING_PASSPHRASE`, demandé en saisie masquée ;
 - la variable publique `SIGNING_FINGERPRINT` ;
-- la variable `PUBLISH_ENABLED=true`, qui autorise les publications suivantes.
+- la variable `PUBLISH_ENABLED=true`, qui rend les publications possibles.
+
+Chaque publication reste une décision explicite : lancement manuel avec la
+saisie `PUBLIER`, puis approbation de l'environnement `publication-pacman`.
+Créer cet environnement avant toute publication (Settings > Environments :
+*Required reviewers* = le mainteneur, *Deployment branches* = `main`,
+*Prevent self-review* désactivé pour un mainteneur unique).
 
 Il désactive d'abord la publication pendant la configuration, vérifie le compte
-GitHub utilisé et déclenche le premier workflow. Aucun secret n'est écrit dans
+GitHub utilisé et demande la première publication, qui attend votre approbation. Aucun secret n'est écrit dans
 le dépôt ni affiché dans le terminal. Conserver la clé et la phrase hors ligne.
 
 Une configuration manuelle est également possible dans Settings > Secrets and
