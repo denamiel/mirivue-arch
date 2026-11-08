@@ -93,6 +93,13 @@ class PublicationControleeTests(unittest.TestCase):
     def test_confirmation_input_is_declared(self):
         self.assertRegex(self.text, r'(?m)^      publier:\n        description: .*PUBLIER')
 
+    def test_setup_script_never_requests_a_publication(self):
+        script = (WORKFLOW.parents[2] / 'Configurer-publication-GitHub.sh').read_text(encoding='utf-8')
+        executed = [line for line in script.splitlines()
+                    if re.match(r'^\s*gh workflow run\b', line)]
+        self.assertEqual(executed, [], 'le script de configuration ne doit jamais lancer de publication')
+        self.assertIn('environments/publication-pacman', script)
+
     def test_only_publish_job_writes_releases(self):
         for job in re.findall(r'(?m)^  ([\w-]+):\s*$', self.text.split('\njobs:\n', 1)[1]):
             block = '\n'.join(job_block(self.text, job))
