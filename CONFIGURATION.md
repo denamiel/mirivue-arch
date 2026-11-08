@@ -51,10 +51,19 @@ Le script envoie directement à GitHub, au dépôt `denamiel/mirivue-arch` :
 - le secret `SIGNING_PRIVATE_KEY` depuis le fichier local ;
 - le secret `SIGNING_PASSPHRASE`, demandé en saisie masquée ;
 - la variable publique `SIGNING_FINGERPRINT` ;
-- la variable `PUBLISH_ENABLED=true`, qui autorise les publications suivantes.
+- la variable `PUBLISH_ENABLED=true`, qui rend les publications possibles.
 
-Il désactive d'abord la publication pendant la configuration, vérifie le compte
-GitHub utilisé et déclenche le premier workflow. Aucun secret n'est écrit dans
+Chaque publication reste une décision explicite : lancement manuel avec la
+saisie `PUBLIER`, puis approbation de l'environnement `publication-pacman`.
+Créer cet environnement avant toute publication (Settings > Environments :
+*Required reviewers* = le mainteneur, *Deployment branches* = `main`,
+*Prevent self-review* désactivé pour un mainteneur unique).
+
+Il désactive d'abord la publication pendant la configuration et vérifie le compte
+GitHub utilisé. Il ne réactive `PUBLISH_ENABLED` que si l'environnement protégé
+`publication-pacman` existe déjà, et ne demande jamais de publication : il
+affiche la commande à lancer ensuite, après vérification des paquets candidats
+dans l'onglet Actions. Aucun secret n'est écrit dans
 le dépôt ni affiché dans le terminal. Conserver la clé et la phrase hors ligne.
 
 Une configuration manuelle est également possible dans Settings > Secrets and
@@ -71,6 +80,21 @@ et `manifest.json` signé. Comparer l'empreinte publiée à la clé locale.
 
 Ne pas configurer les ordinateurs clients avant cette réussite. Les commandes
 client figurent dans README.md. L'empreinte complète vérifiée est indispensable.
+
+## Contrôler qu'un passage planifié ne publie rien
+
+Après chaque modification du workflow, vérifier en lecture seule le dernier
+passage planifié, sans jamais lancer une vraie publication pour tester :
+
+```bash
+gh run list --repo denamiel/mirivue-arch --workflow repository.yml --event schedule --limit 1 \
+  --json databaseId --jq '.[0].databaseId' \
+  | xargs -I{} gh run view {} --repo denamiel/mirivue-arch --json jobs \
+      --jq '.jobs[] | select(.name | startswith("Publier")) | "\(.name) : \(.conclusion)"'
+```
+
+Résultat attendu : `skipped`, et le fichier `manifest.json` de la publication
+`repository` inchangé.
 
 ## Suspension et renouvellement
 

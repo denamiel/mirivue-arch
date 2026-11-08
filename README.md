@@ -37,10 +37,18 @@ ensuite. Le job de publication dispose seul de la vraie clé et de l'autorisatio
 d'écriture des publications. Il est réservé à `main`, après tous les contrôles,
 et n'est jamais exécuté pour une pull request.
 
-Une fois activée, la recherche de nouvelles versions validées a lieu chaque heure.
-Un lancement manuel est également possible depuis Actions. Sans changement,
-le dépôt n'est pas reconstruit ; l'option `force_rebuild` permet au mainteneur
-une reconstruction explicite avec nouvelle révision.
+Aucune publication n'est automatique. Les exécutions planifiées (chaque heure)
+et les push construisent et vérifient seulement. Publier exige un lancement
+manuel sur `main` avec la saisie `PUBLIER`, la variable `PUBLISH_ENABLED=true`
+et l'approbation du mainteneur dans l'environnement protégé
+`publication-pacman` :
+
+```bash
+gh workflow run repository.yml --repo denamiel/mirivue-arch --ref main -f publier=PUBLIER
+```
+
+Sans changement, le dépôt n'est pas reconstruit ; l'option `force_rebuild`
+permet au mainteneur une reconstruction explicite avec nouvelle révision.
 
 ## Publication et conservation
 

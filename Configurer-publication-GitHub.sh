@@ -19,7 +19,17 @@ printf '\n'
 printf '%s' "$signing_password" | gh secret set SIGNING_PASSPHRASE --repo "$repository"
 unset signing_password
 gh variable set SIGNING_FINGERPRINT --repo "$repository" --body "$fingerprint"
+# Never publish from this script. The protected environment must exist before
+# any publication can be requested, and publishing stays a separate decision.
+if ! gh api "repos/$repository/environments/publication-pacman" \
+        --jq '[.protection_rules[] | select(.type == "required_reviewers")] | length' 2>/dev/null | grep -qx 1; then
+    echo 'Configuration envoyée. Publication laissée désactivée : créez d’abord' >&2
+    echo 'l’environnement protégé publication-pacman (voir CONFIGURATION.md).' >&2
+    exit 1
+fi
 gh variable set PUBLISH_ENABLED --repo "$repository" --body true
-gh workflow run repository.yml --repo "$repository"
-echo 'Configuration envoyée directement à GitHub ; première publication demandée.'
+echo 'Configuration envoyée directement à GitHub. Aucune publication n’a été demandée.'
+echo 'Pour publier, après vérification des paquets candidats dans Actions :'
+echo "  gh workflow run repository.yml --repo $repository --ref main -f publier=PUBLIER"
+echo 'puis approuvez l’environnement publication-pacman sur la page de l’exécution.'
 echo "Suivi : https://github.com/$repository/actions"
