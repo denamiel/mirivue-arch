@@ -19,14 +19,26 @@ cat >> "$validation_dir/pacman.conf" <<EOF
 SigLevel = Required DatabaseRequired
 Server = file://$repository_dir
 EOF
-# Real dependency resolution and coexistence installation, with signatures.
+# Install and exercise only changed editions. Other published packages remain
+# signature-checked in the catalogue without blocking on their GUI test suite.
+mapfile -t changed_packages < <(python - "$2" <<'PYCODE'
+import json,sys
+for entry in json.load(open(sys.argv[1]))['packages']:
+    print(entry['name'])
+PYCODE
+)
+test "${#changed_packages[@]}" -gt 0
 pacman --config "$validation_dir/pacman.conf" --gpgdir "$validation_dir/keyring" \
-  --noconfirm -Syu mirivue-gnome mirivue-kde
-mirivue-gnome --version
-mirivue-kde --version
-python scripts/check_installed_docs.py "$repository_dir"
-QT_QPA_PLATFORM=offscreen timeout 45 mirivue-kde --smoke-test
-xvfb-run -a dbus-run-session -- timeout 45 mirivue-gnome --window-smoke-test
+  --noconfirm -Syu "${changed_packages[@]}"
+python scripts/check_installed_docs.py "$repository_dir" "${changed_packages[@]}"
+for package_name in "${changed_packages[@]}"; do
+  "$package_name" --version
+  if [[ "$package_name" == mirivue-kde ]]; then
+    QT_QPA_PLATFORM=offscreen timeout 45 mirivue-kde --smoke-test
+  else
+    xvfb-run -a dbus-run-session -- timeout 45 mirivue-gnome --window-smoke-test
+  fi
+done
 # Signature failures must never be accepted as a valid repository.
 mkdir "$validation_dir/bad"
 cp "$repository_dir/mirivue.db" "$validation_dir/bad/mirivue.db"

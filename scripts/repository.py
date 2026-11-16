@@ -69,28 +69,59 @@ def previous_manifest():
     return data
 
 
-def make_plan(previous=None):
-    entries = []
-    changed = previous is None
-    for edition, (repo, workflow, module) in SOURCES.items():
+def version_key(pkgver):
+    match = re.fullmatch(r'(\d+)\.(\d+)\.(\d+)(?:(alpha|beta|rc)([1-9]\d*))?', pkgver)
+    if not match:
+        raise ValueError('Unsupported published version')
+    major, minor, patch, stage, number = match.groups()
+    return int(major), int(minor), int(patch), {'alpha': 0, 'beta': 1, 'rc': 2, None: 3}[stage], int(number or 0)
+
+
+def snapshot_hash(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+
+
+def make_plan(previous=None, edition='all', validation=False):
+    if edition not in ('all', *SOURCES):
+        raise ValueError('Unknown edition')
+    entries, blocked = [], {}
+    retained = dict((previous or {}).get('packages', {}))
+    for name, (repo, workflow, module) in SOURCES.items():
+        if edition != 'all' and edition != name:
+            continue
         head = api(repo + '/git/ref/heads/main')['object']['sha']
         if not re.fullmatch('[a-f0-9]{40}', head):
             raise ValueError('Invalid source commit')
-        runs = api(repo + '/actions/runs?per_page=100')['workflow_runs']
-        run = next((item for item in runs if item['head_sha'] == head and item['head_branch'] == 'main'
-                    and item['event'] == 'push' and item['path'] == workflow), None)
-        if not run or run['status'] != 'completed' or run['conclusion'] != 'success':
-            raise ValueError(f'{repo}: the current main commit has not passed its required workflow')
         content = api(repo + '/contents/' + module + '?ref=' + head)
         upstream, pkgver = version(base64.b64decode(content['content']).decode())
-        name = 'mirivue-' + edition
-        old = (previous or {}).get('packages', {}).get(name)
-        revision = int(old['pkgrel']) + 1 if old and old['pkgver'] == pkgver else 1
-        if old and (old['source_sha'] != head or old['pkgver'] != pkgver):
-            changed = True
-        entries.append(dict(edition=edition, repository=repo, sha=head, upstream=upstream,
-                            pkgver=pkgver, pkgrel=revision, name=name, workflow_run=run['id']))
-    return dict(schema=1, packages=entries, changed=changed)
+        package = 'mirivue-' + name
+        old = retained.get(package)
+        # A merge without an explicitly increased application version is not
+        # a publication request, even if its source commit changed.
+        if old and not validation and version_key(pkgver) <= version_key(old['pkgver']):
+            continue
+        workflows = [workflow]
+        if name == 'kde':
+            workflows.append('.github/workflows/fedora-package.yml')
+        runs = api(repo + '/actions/runs?per_page=100')['workflow_runs']
+        selected = []
+        for required in workflows:
+            matching = [r for r in runs if r['head_sha'] == head and r['head_branch'] == 'main'
+                        and r['event'] == 'push' and r['path'] == required]
+            run = max(matching, key=lambda r: r['id']) if matching else None
+            if not run or run['status'] != 'completed' or run['conclusion'] != 'success':
+                blocked[name] = 'Required main workflow not successful: ' + required
+                break
+            selected.append(run)
+        else:
+            entries.append(dict(edition=name, repository=repo, sha=head, upstream=upstream,
+                pkgver=pkgver, pkgrel=int(old['pkgrel']) + 1 if old and validation else 1,
+                name=package, workflow_run=selected[0]['id']))
+            retained.pop(package, None)
+    if set(retained) | {p['name'] for p in entries} != {'mirivue-gnome', 'mirivue-kde'}:
+        raise ValueError('Initial repository needs successful sources for both editions')
+    return dict(schema=1, packages=entries, retained=retained, previous=previous,
+                validation_only=validation, changed=bool(entries), blocked=blocked)
 
 
 def prepare_build(entry, source, destination):
@@ -143,8 +174,8 @@ def package_info(path):
 def collect(plan, directory):
     files = list(Path(directory).rglob('*.pkg.tar.zst'))
     expected = {entry['name']: entry for entry in plan['packages']}
-    if set(expected) != {'mirivue-gnome', 'mirivue-kde'} or len(files) != 2:
-        raise ValueError('Exactly the two Mirivue packages are required')
+    if not expected or not set(expected) <= {'mirivue-gnome', 'mirivue-kde'} or len(files) != len(expected):
+        raise ValueError('Exactly the changed Mirivue packages are required')
     result = {}
     for path in files:
         info = package_info(path)
@@ -160,6 +191,83 @@ def collect(plan, directory):
     return result
 
 
+def download_asset(name, directory):
+    if not re.fullmatch(r'[A-Za-z0-9_.+~-]+', name):
+        raise ValueError('Unsafe asset name')
+    target = Path(directory) / name
+    with urllib.request.urlopen(SERVER + '/' + name, timeout=60) as response:
+        target.write_bytes(response.read(128 * 1024 * 1024 + 1))
+    if target.stat().st_size > 128 * 1024 * 1024:
+        raise ValueError('Asset exceeds size limit')
+    return target
+
+
+def retain_packages(plan, output, fingerprint, manifest):
+    retained = plan.get('retained', {})
+    if not retained:
+        return []
+    import tempfile
+    trusted = os.environ.get('TRUSTED_RELEASE_FINGERPRINT', '')
+    if not re.fullmatch('[A-F0-9]{40}', trusted) or plan['previous']['signing_fingerprint'] != trusted:
+        raise ValueError('Published signing key differs from the independent trusted fingerprint')
+    with tempfile.TemporaryDirectory() as folder:
+        root = Path(folder)
+        home = root / 'gpg'; home.mkdir(mode=0o700)
+        key = download_asset('mirivue-key.asc', root)
+        command(['gpg', '--homedir', home, '--batch', '--import', key])
+        def verify(path):
+            status = command(['gpg', '--homedir', home, '--batch', '--status-fd', '1', '--verify',
+                              str(path) + '.sig', path], capture_output=True, text=True).stdout
+            if 'VALIDSIG ' + trusted + ' ' not in status:
+                raise ValueError('Published signature has an unexpected signer')
+        old_manifest = download_asset('manifest.json', root)
+        download_asset('manifest.json.sig', root)
+        verify(old_manifest)
+        if json.loads(old_manifest.read_text()) != plan['previous']:
+            raise ValueError('Published repository changed while preparing retained packages')
+        paths = []
+        for name, entry in retained.items():
+            target = download_asset(entry['filename'], output)
+            download_asset(entry['filename'] + '.sig', output)
+            verify(target)
+            if hashlib.sha256(target.read_bytes()).hexdigest() != entry['sha256']:
+                raise ValueError('Retained package checksum mismatch')
+            info = package_info(target)
+            if info.get('pkgname') != name or info.get('pkgver') != entry['pkgver'] + '-' + str(entry['pkgrel']):
+                raise ValueError('Retained package metadata differs from signed manifest')
+            if entry['source_archive'] != name + '-' + entry['source_sha'] + '-sources.tar.gz':
+                raise ValueError('Retained source identity is invalid')
+            archive = download_asset(entry['source_archive'], output)
+            if hashlib.sha256(archive.read_bytes()).hexdigest() != entry['source_sha256']:
+                raise ValueError('Retained source checksum mismatch')
+            # Disposable installation tests sign the whole catalogue with their
+            # test key; production keeps each unchanged package's original sig.
+            if fingerprint != trusted:
+                command(['gpg', '--batch', '--yes', '--local-user', fingerprint,
+                         '--output', str(target) + '.sig', '--detach-sign', target])
+            paths.append(target)
+            manifest['packages'][name] = dict(entry)
+        return paths
+
+
+def assert_publication_context(plan):
+    if (plan.get('validation_only') or not plan.get('packages')
+            or os.environ.get('GITHUB_REF') != 'refs/heads/main'
+            or os.environ.get('GITHUB_EVENT_NAME') not in ('push', 'schedule', 'workflow_dispatch')
+            or os.environ.get('PUBLISH_ENABLED') != 'true'):
+        raise ValueError('This plan is not authorized for automatic publication')
+    branch = api(REPOSITORY + '/branches/main')
+    if not branch['protected'] or branch['commit']['sha'] != os.environ.get('GITHUB_SHA'):
+        raise ValueError('Only the current protected publication branch may publish')
+    previous = previous_manifest()
+    if previous != plan.get('previous'):
+        raise ValueError('Publication baseline changed')
+    for entry in plan['packages']:
+        fresh = make_plan(previous, entry['edition'])
+        if fresh['packages'] != [entry]:
+            raise ValueError('Source or required validation changed since planning')
+
+
 def build_repository(plan, directory, output, fingerprint):
     if not re.fullmatch(r'[A-F0-9]{40}', fingerprint):
         raise ValueError('A complete signing fingerprint is required')
@@ -168,8 +276,9 @@ def build_repository(plan, directory, output, fingerprint):
     if any(output.iterdir()):
         raise ValueError('Repository staging directory must be empty')
     packages = collect(plan, directory)
-    manifest = dict(schema=1, signing_fingerprint=fingerprint, packages={})
-    paths = []
+    manifest = dict(schema=1, signing_fingerprint=fingerprint, packages={},
+                    previous_manifest_sha256=snapshot_hash(plan.get('previous')))
+    paths = retain_packages(plan, output, fingerprint, manifest)
     for name, (source, entry) in packages.items():
         target = output / source.name
         shutil.copyfile(source, target)
@@ -214,11 +323,21 @@ def publish(directory):
     directory = Path(directory)
     manifest = json.loads((directory / 'manifest.json').read_text())
     previous = previous_manifest()
+    if manifest.get('previous_manifest_sha256') != snapshot_hash(previous):
+        raise ValueError('Published manifest changed since planning; rerun validation')
+    if set(manifest.get('packages', {})) != {'mirivue-gnome', 'mirivue-kde'}:
+        raise ValueError('Both editions must remain in the repository')
+    changed = set(manifest['packages'])
     if previous:
         if previous['signing_fingerprint'] != manifest['signing_fingerprint']:
             raise ValueError('Key rotation requires a separate explicit procedure')
         for name, item in manifest['packages'].items():
             old = previous['packages'][name]
+            if item == old:
+                changed.remove(name)
+                continue
+            if version_key(item['pkgver']) <= version_key(old['pkgver']):
+                raise ValueError('Only an explicitly increased application version may publish')
             if (old.get('source_archive') == item.get('source_archive')
                     and old.get('source_sha256') != item.get('source_sha256')):
                 raise ValueError('An existing source archive must retain its exact checksum')
@@ -230,6 +349,8 @@ def publish(directory):
     else:
         command(['gh', 'release', 'create', RELEASE, '--repo', REPOSITORY, '--target', os.environ['GITHUB_SHA'],
                  '--title', 'Mirivue — dépôt Pacman', '--notes', 'Signed Arch Linux / CachyOS packages.', '--prerelease'])
+    if not changed:
+        raise ValueError('No new application version to publish')
     # Upload immutable versioned packages first. Keep older package assets.
     package_files = [directory / item['filename'] for item in manifest['packages'].values()]
     package_files += [Path(str(path) + '.sig') for path in package_files]
@@ -240,7 +361,11 @@ def publish(directory):
     for path in source_files:
         if path.name not in known_names:
             command(['gh', 'release', 'upload', RELEASE, '--repo', REPOSITORY, path])
-    command(['gh', 'release', 'upload', RELEASE, '--repo', REPOSITORY, *package_files])
+    changed_files = [directory / manifest['packages'][name]['filename'] for name in changed]
+    changed_files += [Path(str(path) + '.sig') for path in changed_files]
+    if not changed_files:
+        raise ValueError('No new application version to publish')
+    command(['gh', 'release', 'upload', RELEASE, '--repo', REPOSITORY, *changed_files])
     remaining = [path for path in directory.iterdir() if path not in package_files and path not in source_files]
     # Publish the database only after all referenced packages exist remotely.
     remaining.sort(key=lambda path: ('mirivue.db' in path.name, path.name))
@@ -250,35 +375,48 @@ def publish(directory):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=('plan', 'prepare', 'index', 'publish'))
+    parser.add_argument('action', choices=('plan', 'prepare', 'index', 'check', 'publish'))
     parser.add_argument('--plan', type=Path, default=Path('plan.json'))
-    parser.add_argument('--edition', choices=SOURCES)
+    parser.add_argument('--edition', choices=(*SOURCES, 'all'), default='all')
     parser.add_argument('--source', type=Path)
     parser.add_argument('--directory', type=Path, default=Path('unsigned'))
     parser.add_argument('--output', type=Path, default=Path('candidate'))
     args = parser.parse_args()
     if args.action == 'plan':
         event = os.environ.get('GITHUB_EVENT_NAME', '')
-        enabled = os.environ.get('PUBLISH_ENABLED') == 'true'
-        if event == 'schedule' and not enabled:
-            plan = dict(schema=1, packages=[], changed=False)
-        else:
-            plan = make_plan(previous_manifest())
-        build = bool(plan['packages']) and (plan['changed'] or event not in ('schedule', 'workflow_dispatch')
-                                            or os.environ.get('FORCE_REBUILD') == 'true')
+        previous = previous_manifest()
+        plan = make_plan(previous, args.edition)
+        # PRs and changes to this repository validate the retained-package path
+        # using a disposable revision. That plan can NEVER be published.
+        if not plan['changed'] and event in ('push', 'pull_request') and previous:
+            plan = make_plan(previous, 'kde', validation=True)
+            if not plan['packages']:
+                raise ValueError('Repository changes require an installation test: ' + str(plan['blocked']))
+        build = bool(plan['packages'])
+        branch = api(REPOSITORY + '/branches/main')
+        publish = (build and not plan['validation_only'] and event in ('push', 'schedule', 'workflow_dispatch')
+                   and os.environ.get('GITHUB_REF') == 'refs/heads/main'
+                   and os.environ.get('PUBLISH_ENABLED') == 'true' and branch['protected'])
         args.plan.write_text(json.dumps(plan, indent=2) + '\n')
         if os.environ.get('GITHUB_OUTPUT'):
             with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
                 stream.write('build=' + str(build).lower() + '\n')
+                stream.write('publish=' + str(publish).lower() + '\n')
                 stream.write('matrix=' + json.dumps({'include': plan['packages']}, separators=(',', ':')) + '\n')
         print('Validated sources; build required: ' + str(build))
+        for edition, reason in plan['blocked'].items():
+            print(f'{edition}: retained published package ({reason})')
     elif args.action == 'prepare':
         plan = json.loads(args.plan.read_text())
         entry = next(item for item in plan['packages'] if item['edition'] == args.edition)
         prepare_build(entry, args.source, args.directory)
+    elif args.action == 'check':
+        assert_publication_context(json.loads(args.plan.read_text()))
     elif args.action == 'index':
         build_repository(json.loads(args.plan.read_text()), args.directory, args.output, os.environ['SIGNING_FINGERPRINT'])
     else:
+        plan = json.loads(args.plan.read_text())
+        assert_publication_context(plan)
         publish(args.directory)
 
 

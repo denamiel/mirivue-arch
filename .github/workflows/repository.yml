@@ -5,14 +5,11 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
-      force_rebuild:
-        description: Reconstruire même sans nouvelle version (incrémente pkgrel)
-        type: boolean
-        default: false
-      publier:
-        description: Pour publier le dépôt signé, taper exactement PUBLIER
-        required: false
-        default: ''
+      edition:
+        description: Édition à examiner (seules les nouvelles versions validées sont publiées)
+        type: choice
+        options: [all, kde, gnome]
+        default: all
   schedule:
     - cron: '17 * * * *'
 permissions:
@@ -27,6 +24,7 @@ jobs:
     outputs:
       build: ${{ steps.plan.outputs.build }}
       matrix: ${{ steps.plan.outputs.matrix }}
+      publish: ${{ steps.plan.outputs.publish }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -38,8 +36,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PUBLISH_ENABLED: ${{ vars.PUBLISH_ENABLED }}
-          FORCE_REBUILD: ${{ inputs.force_rebuild }}
-        run: python3 scripts/repository.py plan
+          EDITION: ${{ inputs.edition || 'all' }}
+        run: python3 scripts/repository.py plan --edition "$EDITION"
       - uses: actions/upload-artifact@v4
         with:
           name: build-plan
@@ -95,7 +93,7 @@ jobs:
           if-no-files-found: error
 
   installation:
-    name: Vérifier les signatures et installer les deux éditions avec Pacman
+    name: Vérifier les signatures et installer les éditions modifiées
     needs: [plan, build]
     runs-on: ubuntu-latest
     container: archlinux:base-devel
@@ -132,6 +130,8 @@ jobs:
           echo "GNUPGHOME=$test_key_home" >> "$GITHUB_ENV"
           echo "SIGNING_FINGERPRINT=$fingerprint" >> "$GITHUB_ENV"
       - name: Signer et vérifier le catalogue de test
+        env:
+          TRUSTED_RELEASE_FINGERPRINT: ${{ vars.SIGNING_FINGERPRINT }}
         run: |
           python scripts/repository.py index
           bash scripts/validate_repository.sh candidate
@@ -140,7 +140,7 @@ jobs:
           GTK_A11Y: none
           GSK_RENDERER: cairo
           QT_QPA_PLATFORM: offscreen
-        run: bash scripts/test_installation.sh candidate
+        run: bash scripts/test_installation.sh candidate plan.json
       - name: Détruire la clé éphémère (jamais publiée)
         if: always()
         run: |
@@ -149,18 +149,38 @@ jobs:
             rm -rf -- "$GNUPGHOME"
           fi
 
+  qualification:
+    name: Validation du dépôt signé
+    needs: [plan, build, installation]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuser un échec ou un contrôle obligatoire ignoré
+        env:
+          PLAN: ${{ needs.plan.result }}
+          BUILD: ${{ needs.build.result }}
+          INSTALLATION: ${{ needs.installation.result }}
+          REQUIRED: ${{ needs.plan.outputs.build }}
+        run: |
+          python3 - <<'PYCODE'
+          import os
+          assert os.environ['PLAN'] == 'success'
+          expected = 'success' if os.environ['REQUIRED'] == 'true' else 'skipped'
+          assert os.environ['BUILD'] == expected
+          assert os.environ['INSTALLATION'] == expected
+          PYCODE
+
   publish:
     name: Publier le dépôt avec la clé du propriétaire
-    needs: [plan, build, installation]
-    # Les exécutions planifiées et les push valident et construisent seulement.
-    # Publication : lancement manuel, confirmation tapée, environnement approuvé.
-    if: >-
-      github.ref == 'refs/heads/main'
-      && github.event_name == 'workflow_dispatch'
-      && inputs.publier == 'PUBLIER'
-      && vars.PUBLISH_ENABLED == 'true'
+    needs: [plan, build, installation, qualification]
+    # A changed, increasing version on validated upstream main is the release
+    # decision. Pull requests and disposable CI plans cannot publish.
+    if: github.ref == 'refs/heads/main' && needs.plan.outputs.publish == 'true'
     runs-on: ubuntu-latest
     environment: publication-pacman
+    env:
+      PUBLISH_ENABLED: ${{ vars.PUBLISH_ENABLED }}
+      TRUSTED_RELEASE_FINGERPRINT: ${{ vars.SIGNING_FINGERPRINT }}
     container: archlinux:base-devel
     permissions:
       contents: write
@@ -179,6 +199,10 @@ jobs:
           pattern: unsigned-*
           path: unsigned
           merge-multiple: true
+      - name: Vérifier le plan et la protection avant de charger la clé privée
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/repository.py check
       - name: Préparer le trousseau temporaire de signature
         run: |
           signing_home="$(mktemp -d)"

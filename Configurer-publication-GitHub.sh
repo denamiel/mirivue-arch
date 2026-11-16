@@ -12,24 +12,24 @@ fingerprint="$(cat "$signing_dir/fingerprint.txt")"
 [[ "$fingerprint" =~ ^[A-F0-9]{40}$ ]] || { echo 'Empreinte de signature invalide.' >&2; exit 1; }
 repository='denamiel/mirivue-arch'
 gh variable set PUBLISH_ENABLED --repo "$repository" --body false
-gh secret set SIGNING_PRIVATE_KEY --repo "$repository" < "$signing_dir/private-key.asc"
+gh secret set SIGNING_PRIVATE_KEY --repo "$repository" --env publication-pacman < "$signing_dir/private-key.asc"
 read -r -s -p 'Phrase secrète de la clé GnuPG (saisie masquée) : ' signing_password
 printf '\n'
 [[ -n "$signing_password" ]] || { echo 'Une phrase secrète non vide est requise.' >&2; exit 1; }
-printf '%s' "$signing_password" | gh secret set SIGNING_PASSPHRASE --repo "$repository"
+printf '%s' "$signing_password" | gh secret set SIGNING_PASSPHRASE --repo "$repository" --env publication-pacman
 unset signing_password
 gh variable set SIGNING_FINGERPRINT --repo "$repository" --body "$fingerprint"
-# Never publish from this script. The protected environment must exist before
-# any publication can be requested, and publishing stays a separate decision.
+# Main-only publication replaces per-release manual approvals.
 if ! gh api "repos/$repository/environments/publication-pacman" \
-        --jq '[.protection_rules[] | select(.type == "required_reviewers")] | length' 2>/dev/null | grep -qx 1; then
-    echo 'Configuration envoyée. Publication laissée désactivée : créez d’abord' >&2
-    echo 'l’environnement protégé publication-pacman (voir CONFIGURATION.md).' >&2
+        --jq '[.protection_rules[] | select(.type == "required_reviewers")] | length' 2>/dev/null | grep -qx 0; then
+    echo 'Publication laissée désactivée : configurez publication-pacman sans reviewers.' >&2
+    exit 1
+fi
+if ! gh api "repos/$repository/branches/main" --jq .protected | grep -qx true; then
+    echo 'Publication laissée désactivée : protégez main avec PR et validation obligatoire.' >&2
     exit 1
 fi
 gh variable set PUBLISH_ENABLED --repo "$repository" --body true
-echo 'Configuration envoyée directement à GitHub. Aucune publication n’a été demandée.'
-echo 'Pour publier, après vérification des paquets candidats dans Actions :'
-echo "  gh workflow run repository.yml --repo $repository --ref main -f publier=PUBLIER"
-echo 'puis approuvez l’environnement publication-pacman sur la page de l’exécution.'
-echo "Suivi : https://github.com/$repository/actions"
+echo 'Publications automatiques des nouvelles versions validées activées.'
+echo 'Aucun workflow n’a été lancé par ce script. Suivi :'
+echo "https://github.com/$repository/actions"

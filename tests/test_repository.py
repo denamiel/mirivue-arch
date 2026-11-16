@@ -20,7 +20,7 @@ class RepositoryTests(unittest.TestCase):
         if '/actions/runs' in path:
             edition = 'gnome' if 'Mirivue-gnome' in path else 'kde'
             return {'workflow_runs': [{'head_sha': 'a' * 40, 'head_branch': 'main', 'event': 'push',
-                'path': repo.SOURCES[edition][1], 'status': 'completed', 'conclusion': 'success', 'id': 12}]}
+                'path': workflow, 'status': 'completed', 'conclusion': 'success', 'id': 12+i} for i, workflow in enumerate([repo.SOURCES[edition][1]] + (['.github/workflows/fedora-package.yml'] if edition=='kde' else []))]}
         if '/contents/' in path:
             return {'content': base64.b64encode(b'__version__ = "1.0.0-beta.2"').decode()}
         raise AssertionError(path)
@@ -43,16 +43,45 @@ class RepositoryTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     repo.make_plan()
 
-    def test_unchanged_source_skips_publication_and_rebuild_gets_a_new_revision(self):
-        old = {'packages': {name: {'pkgver': '1.0.0beta2', 'pkgrel': 3, 'source_sha': 'a' * 40}
-                           for name in ('mirivue-gnome', 'mirivue-kde')}}
-        with patch.object(repo, 'api', side_effect=self.fake_api):
-            plan = repo.make_plan(old)
+    def test_same_version_never_rebuilds_even_when_main_commit_changes(self):
+        old = {'packages': {name: {'pkgver':'1.0.0beta2','pkgrel':3,'source_sha':'b'*40}
+                           for name in ('mirivue-gnome','mirivue-kde')}}
+        with patch.object(repo,'api',side_effect=self.fake_api):plan=repo.make_plan(old)
         self.assertFalse(plan['changed'])
-        self.assertEqual([entry['pkgrel'] for entry in plan['packages']], [4, 4])
-        old['packages']['mirivue-kde']['source_sha'] = 'b' * 40
-        with patch.object(repo, 'api', side_effect=self.fake_api):
-            self.assertTrue(repo.make_plan(old)['changed'])
+        self.assertEqual(plan['packages'],[])
+        self.assertEqual(plan['retained'],old['packages'])
+
+    def test_kde_only_release_does_not_read_or_rebuild_gnome(self):
+        old={'packages': {'mirivue-gnome':{'pkgver':'1.0.0beta2','pkgrel':19,'source_sha':'b'*40},
+                          'mirivue-kde':{'pkgver':'1.0.0beta1','pkgrel':1,'source_sha':'b'*40}}}
+        def api(path,optional=False):
+            self.assertNotIn('Mirivue-gnome',path)
+            return self.fake_api(path,optional)
+        with patch.object(repo,'api',side_effect=api):plan=repo.make_plan(old,'kde')
+        self.assertEqual([p['name'] for p in plan['packages']],['mirivue-kde'])
+        self.assertEqual(plan['retained'],{'mirivue-gnome':old['packages']['mirivue-gnome']})
+        self.assertEqual(plan['packages'][0]['pkgrel'],1)
+
+    def test_failed_gnome_new_version_does_not_block_successful_kde(self):
+        old={'packages': {name:{'pkgver':'1.0.0beta1','pkgrel':1,'source_sha':'b'*40}
+                          for name in ('mirivue-gnome','mirivue-kde')}}
+        def api(path,optional=False):
+            result=self.fake_api(path,optional)
+            if 'Mirivue-gnome' in path and 'workflow_runs' in result:
+                result['workflow_runs'][0]['conclusion']='failure'
+            return result
+        with patch.object(repo,'api',side_effect=api):plan=repo.make_plan(old)
+        self.assertEqual([p['name'] for p in plan['packages']],['mirivue-kde'])
+        self.assertEqual(plan['retained']['mirivue-gnome'],old['packages']['mirivue-gnome'])
+        self.assertIn('gnome',plan['blocked'])
+
+    def test_ci_simulation_never_gets_publication_authorization(self):
+        import os
+        plan={'validation_only':True,'packages':[{}]}
+        with patch.dict(os.environ,{'GITHUB_REF':'refs/heads/main','GITHUB_EVENT_NAME':'push','PUBLISH_ENABLED':'true'}):
+            with patch.object(repo,'api') as api:
+                with self.assertRaises(ValueError):repo.assert_publication_context(plan)
+                api.assert_not_called()
 
     def test_invalid_version_and_code_instead_of_a_literal_are_rejected(self):
         for value in ('1.0.0;touch x', '../bad', '1.0.0-beta.0'):
@@ -107,20 +136,33 @@ class RepositoryTests(unittest.TestCase):
             self.assertIn('pkgrel=3', (second / 'PKGBUILD').read_text())
             self.assertIn("options+=('!debug')", (second / 'PKGBUILD').read_text())
 
-    def test_downgrade_and_unannounced_signing_key_change_prevent_uploads(self):
-        current = {'schema': 1, 'signing_fingerprint': 'A' * 40,
-                   'packages': {name: {'pkgver': '1.0.0beta2', 'pkgrel': 1, 'filename': name + '.pkg.tar.zst'}
-                                for name in ('mirivue-gnome', 'mirivue-kde')}}
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            (root / 'manifest.json').write_text(json.dumps(current))
-            changed = dict(current, signing_fingerprint='B' * 40)
-            with patch.object(repo, 'previous_manifest', return_value=changed), patch.object(repo, 'command') as calls:
-                with self.assertRaises(ValueError):
-                    repo.publish(root)
+    def test_stale_baseline_and_same_version_cannot_upload(self):
+        old={'schema':1,'signing_fingerprint':'A'*40,'packages':{
+            name:{'pkgver':'1.0.0beta2','pkgrel':1,'filename':name+'.pkg.tar.zst'}
+            for name in ('mirivue-gnome','mirivue-kde')}}
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            candidate=dict(old,previous_manifest_sha256=repo.snapshot_hash(old))
+            (root/'manifest.json').write_text(json.dumps(candidate))
+            with patch.object(repo,'previous_manifest',return_value=dict(old,signing_fingerprint='B'*40)),patch.object(repo,'command') as calls:
+                with self.assertRaises(ValueError):repo.publish(root)
                 calls.assert_not_called()
-            with patch.object(repo, 'previous_manifest', return_value=current), patch.object(repo, 'command') as calls:
-                calls.return_value.stdout = '0'
-                with self.assertRaises(ValueError):
-                    repo.publish(root)
-                self.assertEqual(calls.call_count, 1)
+            with patch.object(repo,'previous_manifest',return_value=old),patch.object(repo,'command') as calls:
+                with self.assertRaises(ValueError):repo.publish(root)
+                calls.assert_not_called()
+
+    def test_collect_accepts_one_changed_edition_and_rejects_extra_files(self):
+        plan={'packages':[{'name':'mirivue-kde','pkgver':'1.0.3','pkgrel':1}]}
+        with tempfile.TemporaryDirectory() as folder:
+            p=Path(folder)/'mirivue-kde.pkg.tar.zst';p.write_bytes(b'package')
+            with patch.object(repo,'package_info',return_value={'pkgname':'mirivue-kde','pkgver':'1.0.3-1','arch':'x86_64'}):
+                self.assertEqual(set(repo.collect(plan,folder)),{'mirivue-kde'})
+                (Path(folder)/'extra.pkg.tar.zst').write_bytes(b'extra')
+                with self.assertRaises(ValueError):repo.collect(plan,folder)
+
+    def test_retention_refuses_untrusted_owner_key_before_downloading(self):
+        import os
+        plan={'retained':{'mirivue-gnome':{}},'previous':{'signing_fingerprint':'B'*40}}
+        with patch.dict(os.environ,{'TRUSTED_RELEASE_FINGERPRINT':'A'*40}),patch.object(repo,'download_asset') as download:
+            with self.assertRaises(ValueError):repo.retain_packages(plan,Path('/unused'),'A'*40,{})
+            download.assert_not_called()
