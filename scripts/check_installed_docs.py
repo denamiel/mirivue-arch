@@ -8,7 +8,8 @@ import tarfile
 
 directory = Path(sys.argv[1])
 manifest = json.loads((directory / 'manifest.json').read_text())
-for name, package in manifest['packages'].items():
+for name in sys.argv[2:] or manifest['packages']:
+    package = manifest['packages'][name]
     documents = ['README.md', 'CHANGELOG.md']
     documents += (['LISEZ-MOI-KDE.txt', 'packaging/README.md', 'packaging/fedora/PUBLICATION.md']
                   if name == 'mirivue-kde' else ['BETA-1.0.0.md', 'packaging/PUBLICATION.md'])

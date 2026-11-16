@@ -1,10 +1,4 @@
-"""The signed repository is published only on explicit maintainer authorization.
-
-Scheduled runs, pushes to main (merges) and pull requests build and verify
-only. Publishing requires a manual workflow_dispatch on main with the typed
-confirmation PUBLIER, PUBLISH_ENABLED=true and the protected environment
-publication-pacman. No third-party module is needed.
-"""
+"""Automatic publishing requires increasing versions, trusted main and validated installation."""
 from pathlib import Path
 import re
 import unittest
@@ -68,30 +62,16 @@ class PublicationControleeTests(unittest.TestCase):
         base.update(values)
         return base
 
-    def test_automatic_events_never_publish(self):
-        for label, context in {
-            'exécution planifiée': self.context(**{'github.event_name': 'schedule'}),
-            'push sur main (fusion)': self.context(**{'github.event_name': 'push'}),
-            'pull request': self.context(**{'github.event_name': 'pull_request', 'github.ref': 'refs/pull/1/merge'}),
-            'manuel sans confirmation': self.context(**{'github.event_name': 'workflow_dispatch'}),
-            'manuel, confirmation inexacte': self.context(**{'github.event_name': 'workflow_dispatch', 'inputs.publier': 'oui'}),
-            'manuel hors de main': self.context(**{'github.event_name': 'workflow_dispatch', 'inputs.publier': 'PUBLIER',
-                                                   'github.ref': 'refs/heads/autre'}),
-            'publication désactivée': self.context(**{'github.event_name': 'workflow_dispatch', 'inputs.publier': 'PUBLIER',
-                                                      'vars.PUBLISH_ENABLED': 'false'}),
-        }.items():
-            with self.subTest(event=label):
-                self.assertFalse(evaluate(self.condition, context), f'publierait sur : {label}')
+    def test_only_main_with_a_new_validated_version_can_publish(self):
+        for ref, ready, expected in [('refs/heads/main','true',True),('refs/heads/main','false',False),
+                                     ('refs/pull/1/merge','true',False),('refs/heads/dev','true',False)]:
+            with self.subTest(ref=ref,ready=ready):
+                self.assertEqual(evaluate(self.condition,{'github.ref':ref,'needs.plan.outputs.publish':ready}),expected)
 
-    def test_explicit_manual_run_can_publish(self):
-        self.assertTrue(evaluate(self.condition, self.context(
-            **{'github.event_name': 'workflow_dispatch', 'inputs.publier': 'PUBLIER'})))
-
-    def test_publish_job_uses_the_protected_environment(self):
-        self.assertEqual(job_value(self.publish, 'environment'), 'publication-pacman')
-
-    def test_confirmation_input_is_declared(self):
-        self.assertRegex(self.text, r'(?m)^      publier:\n        description: .*PUBLIER')
+    def test_publish_uses_environment_and_full_installation_gate(self):
+        self.assertEqual(job_value(self.publish,'environment'),'publication-pacman')
+        self.assertIn('qualification',job_value(self.publish,'needs'))
+        self.assertIn('assert_publication_context', (WORKFLOW.parents[2]/'scripts/repository.py').read_text())
 
     def test_setup_script_never_requests_a_publication(self):
         script = (WORKFLOW.parents[2] / 'Configurer-publication-GitHub.sh').read_text(encoding='utf-8')

@@ -53,22 +53,21 @@ Le script envoie directement à GitHub, au dépôt `denamiel/mirivue-arch` :
 - la variable publique `SIGNING_FINGERPRINT` ;
 - la variable `PUBLISH_ENABLED=true`, qui rend les publications possibles.
 
-Chaque publication reste une décision explicite : lancement manuel avec la
-saisie `PUBLIER`, puis approbation de l'environnement `publication-pacman`.
-Créer cet environnement avant toute publication (Settings > Environments :
-*Required reviewers* = le mainteneur, *Deployment branches* = `main`,
-*Prevent self-review* désactivé pour un mainteneur unique).
+La publication est automatique pour les nouvelles versions validées. Créer
+l’environnement `publication-pacman` avec *Deployment branches* limité à `main`,
+sans *Required reviewers* ni délai. Protéger `main` avec PR obligatoire et le
+contrôle **Validation du dépôt signé**, sans suppression, réécriture ou bypass.
+Le modèle de ruleset est fourni dans le dépôt KDE :
+`packaging/protection-mirivue-arch.json`.
 
-Il désactive d'abord la publication pendant la configuration et vérifie le compte
-GitHub utilisé. Il ne réactive `PUBLISH_ENABLED` que si l'environnement protégé
-`publication-pacman` existe déjà, et ne demande jamais de publication : il
-affiche la commande à lancer ensuite, après vérification des paquets candidats
-dans l'onglet Actions. Aucun secret n'est écrit dans
-le dépôt ni affiché dans le terminal. Conserver la clé et la phrase hors ligne.
-
-Une configuration manuelle est également possible dans Settings > Secrets and
-variables > Actions, avec les mêmes noms. Activer la variable `PUBLISH_ENABLED`
-seulement après avoir ajouté les deux secrets et l'empreinte complète.
+Le script désactive la publication pendant la configuration. Les deux secrets
+sont enregistrés dans l’environnement `publication-pacman` ; la variable publique
+`SIGNING_FINGERPRINT` reste dans les variables du dépôt. Il ne réactive
+`PUBLISH_ENABLED` que si l’environnement et la protection de `main` sont prêts.
+Cela autorise les prochaines publications automatiques ; aucun workflow n’est
+lancé par le script lui-même. Une configuration manuelle peut utiliser Settings
+> Environments > publication-pacman > Environment secrets. Ne pas recréer la
+clé existante pour une simple mise à jour.
 
 ## 4. Vérifier la première publication
 
@@ -81,7 +80,7 @@ et `manifest.json` signé. Comparer l'empreinte publiée à la clé locale.
 Ne pas configurer les ordinateurs clients avant cette réussite. Les commandes
 client figurent dans README.md. L'empreinte complète vérifiée est indispensable.
 
-## Contrôler qu'un passage planifié ne publie rien
+## Contrôler un passage planifié sans nouvelle version
 
 Après chaque modification du workflow, vérifier en lecture seule le dernier
 passage planifié, sans jamais lancer une vraie publication pour tester :
@@ -93,7 +92,7 @@ gh run list --repo denamiel/mirivue-arch --workflow repository.yml --event sched
       --jq '.jobs[] | select(.name | startswith("Publier")) | "\(.name) : \(.conclusion)"'
 ```
 
-Résultat attendu : `skipped`, et le fichier `manifest.json` de la publication
+Sans hausse de version validée, résultat attendu : `skipped`, et le fichier `manifest.json` de la publication
 `repository` inchangé.
 
 ## Suspension et renouvellement

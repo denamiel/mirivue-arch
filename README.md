@@ -25,30 +25,32 @@ Le workflow central examine les branches `main` des deux projets publics. Il
 ne retient un commit que si son workflow requis a réussi sur ce même commit.
 Les références sont ensuite figées par SHA pour la construction.
 
-Les deux paquets sont construits sans privilèges avec leurs recettes amont et
-leurs contrôles `makepkg`. Une révision `pkgrel` propre au dépôt augmente lors
-d'une reconstruction de la même version ; une nouvelle version repart de 1.
-Une étape séparée vérifie les signatures et installe réellement les deux éditions
-avec Pacman dans un conteneur Arch jetable. Les catalogues altérés ou non signés
-et les paquets altérés doivent être refusés.
+Les éditions sont indépendantes : seuls les numéros de version explicitement
+augmentés et validés sur leur commit de `main` sont reconstruits. KDE exige ses
+contrôles Fedora et Arch ; GNOME exige ses contrôles dédiés. Les paquets inchangés
+restent dans le catalogue, avec leurs sources et signatures vérifiées.
 
-Les validations utilisent une clé éphémère de test, jamais publiée et supprimée
-ensuite. Le job de publication dispose seul de la vraie clé et de l'autorisation
-d'écriture des publications. Il est réservé à `main`, après tous les contrôles,
-et n'est jamais exécuté pour une pull request.
+Les validations utilisent une clé éphémère de test. Le job de publication seul
+reçoit la clé du propriétaire et l’autorisation d’écriture. Il exige une branche
+`main` protégée, une PR, le contrôle **Validation du dépôt signé**, des sources
+encore valides et un manifeste de départ inchangé.
 
-Aucune publication n'est automatique. Les exécutions planifiées (chaque heure)
-et les push construisent et vérifient seulement. Publier exige un lancement
-manuel sur `main` avec la saisie `PUBLIER`, la variable `PUBLISH_ENABLED=true`
-et l'approbation du mainteneur dans l'environnement protégé
-`publication-pacman` :
+Chaque heure, le workflow publie automatiquement les nouvelles versions validées
+lorsque `PUBLISH_ENABLED=true`. Les PR ne peuvent rien publier. Une modification
+sans hausse de version amont ne publie rien et n’augmente plus artificiellement
+la révision de l’autre édition. Un candidat jetable peut être construit pour
+vérifier les modifications du circuit lui-même ; il ne peut jamais être publié.
+
+Une reprise manuelle peut sélectionner une seule édition :
 
 ```bash
-gh workflow run repository.yml --repo denamiel/mirivue-arch --ref main -f publier=PUBLIER
+gh workflow run repository.yml --repo denamiel/mirivue-arch --ref main -f edition=kde
 ```
 
-Sans changement, le dépôt n'est pas reconstruit ; l'option `force_rebuild`
-permet au mainteneur une reconstruction explicite avec nouvelle révision.
+L’environnement `publication-pacman` reste limité à `main`, sans approbation
+manuelle supplémentaire. La fusion d’une nouvelle version validée constitue
+la décision de publication. `PUBLISH_ENABLED=false` permet de suspendre les
+publications sans retirer les paquets déjà disponibles.
 
 ## Publication et conservation
 
