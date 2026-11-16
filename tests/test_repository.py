@@ -14,6 +14,20 @@ spec.loader.exec_module(repo)
 
 
 class RepositoryTests(unittest.TestCase):
+    def test_publish_command_checks_context_then_calls_publisher(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            plan = root / 'plan.json'
+            plan.write_text(json.dumps({'packages': [{'edition': 'kde'}]}))
+            events = []
+            with patch.object(sys, 'argv', ['repository.py', 'publish', '--plan', str(plan),
+                                           '--directory', str(root / 'candidate')]), \
+                    patch.object(repo, 'assert_publication_context', side_effect=lambda value: events.append('check')), \
+                    patch.object(repo, 'publish', side_effect=lambda directory: events.append('publish')) as publisher:
+                repo.main()
+            self.assertEqual(events, ['check', 'publish'])
+            publisher.assert_called_once_with(root / 'candidate')
+
     def fake_api(self, path, optional=False):
         if '/git/ref/' in path:
             return {'object': {'sha': 'a' * 40}}
