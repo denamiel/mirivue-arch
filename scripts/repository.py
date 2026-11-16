@@ -394,14 +394,14 @@ def main():
                 raise ValueError('Repository changes require an installation test: ' + str(plan['blocked']))
         build = bool(plan['packages'])
         branch = api(REPOSITORY + '/branches/main')
-        publish = (build and not plan['validation_only'] and event in ('push', 'schedule', 'workflow_dispatch')
+        should_publish = (build and not plan['validation_only'] and event in ('push', 'schedule', 'workflow_dispatch')
                    and os.environ.get('GITHUB_REF') == 'refs/heads/main'
                    and os.environ.get('PUBLISH_ENABLED') == 'true' and branch['protected'])
         args.plan.write_text(json.dumps(plan, indent=2) + '\n')
         if os.environ.get('GITHUB_OUTPUT'):
             with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
                 stream.write('build=' + str(build).lower() + '\n')
-                stream.write('publish=' + str(publish).lower() + '\n')
+                stream.write('publish=' + str(should_publish).lower() + '\n')
                 stream.write('matrix=' + json.dumps({'include': plan['packages']}, separators=(',', ':')) + '\n')
         print('Validated sources; build required: ' + str(build))
         for edition, reason in plan['blocked'].items():
