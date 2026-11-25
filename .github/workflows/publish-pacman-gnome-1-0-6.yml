@@ -1,0 +1,32 @@
+name: Demander la publication de Mirivue GNOME stable dans Pacman
+on:
+  push:
+    branches: [codex/publication-pacman-gnome-1-0-6]
+    paths: [.github/workflows/publish-pacman-gnome-1-0-6.yml]
+permissions:
+  actions: write
+  contents: read
+jobs:
+  dispatch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Vérifier la version stable et demander la publication GNOME
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -o pipefail
+          for attempt in {1..30}; do
+            test "$(gh api repos/denamiel/Mirivue-gnome/branches/main --jq '.commit.sha')" = 3f6f8273a1b3fbd26c04523cd0ba384225cad631
+            if gh api 'repos/denamiel/Mirivue-gnome/actions/runs?branch=main&event=push&head_sha=3f6f8273a1b3fbd26c04523cd0ba384225cad631' |
+                 jq -e '[.workflow_runs[] | select(.path == ".github/workflows/checks.yml")] |
+                   max_by(.id) | .conclusion == "success"' >/dev/null &&
+               gh api repos/denamiel/Mirivue-gnome/releases/tags/v1.0.6 2>/dev/null |
+                 jq -e '.tag_name == "v1.0.6" and .draft == false and .prerelease == false and .target_commitish == "3f6f8273a1b3fbd26c04523cd0ba384225cad631"' >/dev/null; then
+              gh workflow run repository.yml --repo "$GITHUB_REPOSITORY" --ref main -f edition=gnome
+              exit 0
+            fi
+            sleep 15
+          done
+          echo 'La version stable et ses contrôles sur main ne sont pas tous visibles.'
+          exit 1
