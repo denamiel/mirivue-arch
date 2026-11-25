@@ -1,0 +1,144 @@
+name: Reprendre le catalogue Pacman de Mirivue GNOME 1.0.6 bêta
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/reprendre-catalogue-gnome-1-0-6.yml]
+
+permissions:
+  contents: read
+concurrency:
+  group: mirivue-pacman-main
+
+jobs:
+  repair:
+    name: Réparer le catalogue signé après l’envoi interrompu
+    if: github.ref == 'refs/heads/main'
+    environment: publication-pacman
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      PUBLISH_ENABLED: ${{ vars.PUBLISH_ENABLED }}
+      SIGNING_FINGERPRINT: ${{ vars.SIGNING_FINGERPRINT }}
+      EXPECTED_GNOME_SHA: e8465431c532a0ba0832f290ec3ae4891b8a8747
+    steps:
+      - name: Installer les outils de validation
+        run: pacman -Syu --noconfirm --needed python gnupg github-cli git
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Vérifier le manifeste et les paquets déjà signés
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import re
+          from scripts.repository import api, command, download_asset, package_info
+
+          repository = "denamiel/mirivue-arch"
+          branch = api(repository + "/branches/main")
+          assert os.environ["GITHUB_REPOSITORY"] == repository
+          assert os.environ["PUBLISH_ENABLED"] == "true"
+          assert branch["protected"] and branch["commit"]["sha"] == os.environ["GITHUB_SHA"]
+          fingerprint = os.environ["SIGNING_FINGERPRINT"]
+          assert re.fullmatch(r"[A-F0-9]{40}", fingerprint)
+
+          output = Path("candidate")
+          output.mkdir()
+          keyring = Path("public-keyring").resolve()
+          keyring.mkdir(mode=0o700)
+          key = download_asset("mirivue-key.asc", output)
+          command(["gpg", "--homedir", keyring, "--batch", "--import", key])
+
+          def verify(path):
+              download_asset(path.name + ".sig", output)
+              status = command(
+                  ["gpg", "--homedir", keyring, "--batch", "--status-fd", "1",
+                   "--verify", str(path) + ".sig", path],
+                  capture_output=True, text=True,
+              ).stdout.splitlines()
+              assert any(line.startswith("[GNUPG:] VALIDSIG " + fingerprint + " ") for line in status)
+
+          manifest_path = download_asset("manifest.json", output)
+          verify(manifest_path)
+          manifest = json.loads(manifest_path.read_text())
+          assert manifest["schema"] == 1 and manifest["signing_fingerprint"] == fingerprint
+          packages = manifest["packages"]
+          assert set(packages) == {"mirivue-gnome", "mirivue-kde"}
+          gnome = packages["mirivue-gnome"]
+          assert gnome["source_repository"] == "denamiel/Mirivue-gnome"
+          assert gnome["source_sha"] == os.environ["EXPECTED_GNOME_SHA"]
+          assert gnome["pkgver"] == "1.0.6beta1" and gnome["pkgrel"] == 1
+          run = api(gnome["source_repository"] + "/actions/runs/" + str(gnome["workflow_run"]))
+          assert run["head_sha"] == gnome["source_sha"] and run["head_branch"] == "main"
+          assert run["event"] == "push" and run["conclusion"] == "success"
+          for name, item in packages.items():
+              package = download_asset(item["filename"], output)
+              verify(package)
+              assert hashlib.sha256(package.read_bytes()).hexdigest() == item["sha256"]
+              metadata = package_info(package)
+              assert metadata["pkgname"] == name
+              assert metadata["pkgver"] == item["pkgver"] + "-" + str(item["pkgrel"])
+              print(name, metadata["pkgver"], flush=True)
+          (output / "fingerprint.txt").write_text(fingerprint + "\n")
+          PY
+      - name: Préparer le trousseau privé temporaire
+        run: |
+          signing_home="$(mktemp -d)"
+          chmod 700 "$signing_home"
+          echo "GNUPGHOME=$signing_home" >> "$GITHUB_ENV"
+      - name: Importer la clé dédiée dans l’environnement existant
+        env:
+          SIGNING_PRIVATE_KEY: ${{ secrets.SIGNING_PRIVATE_KEY }}
+          SIGNING_PASSPHRASE: ${{ secrets.SIGNING_PASSPHRASE }}
+        run: python scripts/import_signing_key.py
+      - name: Régénérer et vérifier le catalogue
+        run: |
+          repo-add --sign --key "$SIGNING_FINGERPRINT" candidate/mirivue.db.tar.gz candidate/*.pkg.tar.zst
+          for stem in mirivue.db mirivue.files; do
+            archive="candidate/$stem.tar.gz"
+            if [[ ! -f "$archive.sig" ]]; then
+              gpg --batch --local-user "$SIGNING_FINGERPRINT" --output "$archive.sig" --detach-sign "$archive"
+            fi
+            gpg --batch --verify "$archive.sig" "$archive"
+            rm -f "candidate/$stem" "candidate/$stem.sig"
+            cp "$archive" "candidate/$stem"
+            cp "$archive.sig" "candidate/$stem.sig"
+          done
+          bash scripts/validate_repository.sh candidate
+      - name: Remettre en ligne les catalogues et vérifier les huit fichiers
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download repository --repo "$GITHUB_REPOSITORY" --pattern manifest.json --dir current
+          cmp current/manifest.json candidate/manifest.json
+          for stem in mirivue.files mirivue.db; do
+            for suffix in .tar.gz .tar.gz.sig '' .sig; do
+              path="candidate/$stem$suffix"
+              uploaded=false
+              for attempt in 1 2 3; do
+                if gh release upload repository "$path" --repo "$GITHUB_REPOSITORY" --clobber; then
+                  uploaded=true
+                  break
+                fi
+                sleep 5
+              done
+              test "$uploaded" = true
+            done
+          done
+          gh release download repository --repo "$GITHUB_REPOSITORY" --pattern 'mirivue.db*' --pattern 'mirivue.files*' --dir published
+          for path in published/*; do cmp "$path" "candidate/${path##*/}"; done
+          test "$(find published -type f | wc -l)" -eq 8
+      - name: Supprimer le trousseau temporaire
+        if: always()
+        run: |
+          if [[ -n "${GNUPGHOME:-}" ]]; then
+            gpgconf --kill all || true
+            rm -rf -- "$GNUPGHOME"
+          fi
